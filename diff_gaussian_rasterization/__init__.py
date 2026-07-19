@@ -29,6 +29,7 @@ def rasterize_gaussians(
     cov3Ds_precomp,
     raster_settings,
 ):
+    # .apply 将参数加进计算图中, 并调用 forward 函数
     return _RasterizeGaussians.apply(
         means3D,
         means2D,
@@ -44,7 +45,7 @@ def rasterize_gaussians(
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx,
+        ctx,  # pytorch 自动创建的上下文
         means3D,
         means2D,
         sh,

@@ -24,6 +24,7 @@ def rasterize_gaussians(
     sh,
     colors_precomp,
     opacities,
+    gaussian_type,
     scales,
     rotations,
     cov3Ds_precomp,
@@ -36,6 +37,7 @@ def rasterize_gaussians(
         sh,
         colors_precomp,
         opacities,
+        gaussian_type,
         scales,
         rotations,
         cov3Ds_precomp,
@@ -51,6 +53,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         sh,
         colors_precomp,
         opacities,
+        gaussian_type,
         scales,
         rotations,
         cov3Ds_precomp,
@@ -63,6 +66,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             means3D,
             colors_precomp,
             opacities,
+            gaussian_type,
             scales,
             rotations,
             raster_settings.scale_modifier,
@@ -81,13 +85,13 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.debug
         )
 
-        # Invoke C++/CUDA rasterizer
+        # Invoke C++/CUDA rasterizer, 调用通过 pybind 绑定的前向渲染的函数
         num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, invdepths = _C.rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer)
+        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, gaussian_type, geomBuffer, binningBuffer, imgBuffer)
         return color, radii, invdepths
 
     @staticmethod
@@ -96,7 +100,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
-        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, gaussian_type, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -104,6 +108,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 radii, 
                 colors_precomp, 
                 opacities,
+                gaussian_type,
                 scales, 
                 rotations, 
                 raster_settings.scale_modifier, 
@@ -127,12 +132,14 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Compute gradients for relevant tensors by invoking backward method
         grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)        
 
+        # 自定义的 torch.autograd.Function.backward() 必须为 forward()
         grads = (
             grad_means3D,
             grad_means2D,
             grad_sh,
             grad_colors_precomp,
             grad_opacities,
+            None,
             grad_scales,
             grad_rotations,
             grad_cov3Ds_precomp,
@@ -141,6 +148,7 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         return grads
 
+# 进行训练的一些参数设置
 class GaussianRasterizationSettings(NamedTuple):
     image_height: int
     image_width: int 
@@ -156,6 +164,7 @@ class GaussianRasterizationSettings(NamedTuple):
     debug : bool
     antialiasing : bool
 
+# python 中 render 中定义的类
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):
         super().__init__()
@@ -172,16 +181,20 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
-        
+    # 在 render 中被调用
+    def forward(self, means3D, means2D, opacities, gaussian_type, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+
         raster_settings = self.raster_settings
 
         if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
             raise Exception('Please provide excatly one of either SHs or precomputed colors!')
-        
+
         if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
             raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
-        
+
+        if (gaussian_type is None):
+            raise Exception('Please provide exactly gaussian type for each gaussian!')
+
         if shs is None:
             shs = torch.Tensor([])
         if colors_precomp is None:
@@ -201,9 +214,9 @@ class GaussianRasterizer(nn.Module):
             shs,
             colors_precomp,
             opacities,
+            gaussian_type,
             scales, 
             rotations,
             cov3D_precomp,
             raster_settings, 
         )
-

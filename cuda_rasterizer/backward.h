@@ -13,6 +13,7 @@
 #define CUDA_RASTERIZER_BACKWARD_H_INCLUDED
 
 #include <cuda.h>
+#include <cstdint>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
@@ -26,9 +27,10 @@ namespace BACKWARD
 		const uint32_t* point_list,
 		int W, int H,
 		const float* bg_color,
-		const float2* means2D,
-		const float4* conic_opacity,
-		const float* colors,
+			const float2* means2D,
+			const float4* conic_opacity,
+			const uint8_t* gaussian_type,
+			const float* colors,
 		const float* depths,
 		const float* final_Ts,
 		const uint32_t* n_contrib,
@@ -45,9 +47,10 @@ namespace BACKWARD
 		const float3* means,
 		const int* radii,
 		const float* shs,
-		const bool* clamped,
-		const float* opacities,
-		const glm::vec3* scales,
+			const bool* clamped,
+			const float* opacities,
+			const uint8_t* gaussian_type,
+			const glm::vec3* scales,
 		const glm::vec4* rotations,
 		const float scale_modifier,
 		const float* cov3Ds,

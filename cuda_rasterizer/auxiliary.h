@@ -37,11 +37,13 @@ __device__ const float SH_C3[] = {
 	-0.5900435899266435f
 };
 
+// 从 ndc 也就是归一化比例转换到像素坐标
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;
 }
 
+// 计算是包围盒计算的左上 tile 坐标和右下 tile 坐标
 __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {
@@ -149,12 +151,13 @@ __forceinline__ __device__ float sigmoid(float x)
 }
 
 __forceinline__ __device__ bool in_frustum(int idx,
-	const float* orig_points,
-	const float* viewmatrix,
-	const float* projmatrix,
+	const float* orig_points, // 原始点
+	const float* viewmatrix,  // 世界系 -> 相机系
+	const float* projmatrix,  // 投影矩阵
 	bool prefiltered,
-	float3& p_view)
+	float3& p_view) 
 {
+	// 读取世界坐标
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 
 	// Bring points to screen space
@@ -163,6 +166,7 @@ __forceinline__ __device__ bool in_frustum(int idx,
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
 	p_view = transformPoint4x3(p_orig, viewmatrix);
 
+	// 归一化深度, 将前 20% 的深度的高斯球滤掉, 认为太近了
 	if (p_view.z <= 0.2f)// || ((p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3)))
 	{
 		if (prefiltered)

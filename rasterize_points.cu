@@ -24,6 +24,7 @@
 #include <string>
 #include <functional>
 
+// 为 tensor 创建一个可回调的 resize 函数, 提供 CUDA rasterizer 在需要的时候动态分配内存
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     auto lambda = [&t](size_t N) {
         t.resize_({(long long)N});
@@ -32,12 +33,14 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
+// 对 python 传入的参数进行包装
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
     const torch::Tensor& opacity,
+	const torch::Tensor& gaussian_type, // 沿着 python 调用链将 gaussian_type 加到当前 CUDA 函数中
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
@@ -59,10 +62,12 @@ RasterizeGaussiansCUDA(
     AT_ERROR("means3D must have dimensions (num_points, 3)");
   }
   
-  const int P = means3D.size(0);
+  const int P = means3D.size(0); // 对应高斯的数量
   const int H = image_height;
   const int W = image_width;
 
+  // 从已有的 tensor 上提取全部属性作为一个 TensorOptions 对象
+  // 主要提取 device, layout 等, 但是将数据类型进行覆盖
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
 
@@ -70,6 +75,7 @@ RasterizeGaussiansCUDA(
   torch::Tensor out_invdepth = torch::full({0, H, W}, 0.0, float_opts);
   float* out_invdepthptr = nullptr;
 
+  // 使用 contiguous 转化为连续内存, 方便后面取指针
   out_invdepth = torch::full({1, H, W}, 0.0, float_opts).contiguous();
   out_invdepthptr = out_invdepth.data<float>();
 
@@ -93,6 +99,7 @@ RasterizeGaussiansCUDA(
 		M = sh.size(1);
       }
 
+	  // 补充内部参数并调用 forward 函数
 	  rendered = CudaRasterizer::Rasterizer::forward(
 	    geomFunc,
 		binningFunc,
@@ -103,7 +110,8 @@ RasterizeGaussiansCUDA(
 		means3D.contiguous().data<float>(),
 		sh.contiguous().data_ptr<float>(),
 		colors.contiguous().data<float>(), 
-		opacity.contiguous().data<float>(), 
+		opacity.contiguous().data<float>(),
+		gaussian_type.contiguous().data_ptr<uint8_t>(), // 传入 gaussian_type
 		scales.contiguous().data_ptr<float>(),
 		scale_modifier,
 		rotations.contiguous().data_ptr<float>(),
@@ -124,13 +132,14 @@ RasterizeGaussiansCUDA(
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
- RasterizeGaussiansBackwardCUDA(
- 	const torch::Tensor& background,
-	const torch::Tensor& means3D,
-	const torch::Tensor& radii,
-    const torch::Tensor& colors,
-	const torch::Tensor& opacities,
-	const torch::Tensor& scales,
+RasterizeGaussiansBackwardCUDA(
+	const torch::Tensor& background,
+		const torch::Tensor& means3D,
+		const torch::Tensor& radii,
+		const torch::Tensor& colors,
+		const torch::Tensor& opacities,
+		const torch::Tensor& gaussian_type,
+		const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
 	const torch::Tensor& cov3D_precomp,
@@ -190,6 +199,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  sh.contiguous().data<float>(),
 	  colors.contiguous().data<float>(),
 	  opacities.contiguous().data<float>(),
+	  gaussian_type.contiguous().data_ptr<uint8_t>(),
 	  scales.data_ptr<float>(),
 	  scale_modifier,
 	  rotations.data_ptr<float>(),

@@ -24,10 +24,10 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	// Efficient View Synthesis" by Zhang et al. (2022)
 	glm::vec3 pos = means[idx];
 	glm::vec3 dir = pos - campos;
-	dir = dir / glm::length(dir);
+	dir = dir / glm::length(dir); 
 
 	glm::vec3* sh = ((glm::vec3*)shs) + idx * max_coeffs;
-	glm::vec3 result = SH_C0 * sh[0];
+	glm::vec3 result = SH_C0 * sh[0];  // 0 阶球谐函数
 
 	if (deg > 0)
 	{
@@ -60,13 +60,17 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 			}
 		}
 	}
-	result += 0.5f;
+	result += 0.5f;  // 在 python 端初始化时减去了 0.5, 在渲染颜色的时候需要将这 0.5 加回来
 
 	// RGB colors are clamped to positive values. If values are
 	// clamped, we need to keep track of this for the backward pass.
+	// 记录哪些通道的颜色为负
 	clamped[3 * idx + 0] = (result.x < 0);
 	clamped[3 * idx + 1] = (result.y < 0);
 	clamped[3 * idx + 2] = (result.z < 0);
+	
+	// 将负通道的颜色截断, clamped 相当于记录数组, 在反向传播的过程中
+    // 如果颜色被截断过, 让被截断的梯度为 0  
 	return glm::max(result, 0.0f);
 }
 
@@ -86,11 +90,13 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
 
+	// 计算雅可比矩阵
 	glm::mat3 J = glm::mat3(
 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
 		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
 		0, 0, 0);
 
+	// 把世界坐标系变成相机坐标系
 	glm::mat3 W = glm::mat3(
 		viewmatrix[0], viewmatrix[4], viewmatrix[8],
 		viewmatrix[1], viewmatrix[5], viewmatrix[9],
@@ -105,12 +111,14 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 
 	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
 
+	// 计算 2D 协方差矩阵
 	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
 }
 
 // Forward method for converting scale and rotation properties of each
 // Gaussian to a 3D covariance matrix in world space. Also takes care
 // of quaternion normalization.
+// 计算协方差矩阵
 __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 rot, float* cov3D)
 {
 	// Create scaling matrix
@@ -148,13 +156,21 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 }
 
 // Perform initial steps for each Gaussian prior to rasterization.
+/**
+ * @brief: 计算前向渲染部分之前的预处理
+ * @brief: 对高斯进行预处理, 离相机太近的高斯滤掉
+ * @brief: 计算每个高斯的 3D 协方差、2D 协方差
+ * @brief: 通过 SH 系数以及阶数计算每个高斯的颜色
+ * @brief: 计算协方差的逆, 计算每个高斯的包围盒
+ */
 template<int C>
 __global__ void preprocessCUDA(int P, int D, int M,
 	const float* orig_points,
 	const glm::vec3* scales,
 	const float scale_modifier,
-	const glm::vec4* rotations,
+	const glm::vec4* rotations, // rotations 中维护的是一个四元数
 	const float* opacities,
+	const uint8_t* gaussian_type,
 	const float* shs,
 	bool* clamped,
 	const float* cov3D_precomp,
@@ -176,8 +192,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	bool prefiltered,
 	bool antialiasing)
 {
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P)
+	auto idx = cg::this_grid().thread_rank();  // 这里的 idx 是线程在 grid 中的全局编号
+	if (idx >= P) // P 代表高斯的数量
 		return;
 
 	// Initialize radius and touched tiles to 0. If this isn't changed,
@@ -186,6 +202,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	tiles_touched[idx] = 0;
 
 	// Perform near culling, quit if outside.
+	// 对距离太近的点进行删除
 	float3 p_view;
 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
@@ -194,7 +211,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
-	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w }; // 高斯中心点投影后的齐次坐标
 
 	// If 3D covariance matrix is precomputed, use it, otherwise compute
 	// from scaling and rotation parameters. 
@@ -212,6 +229,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// Compute 2D screen-space covariance matrix
 	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
 
+	// 由于给 2D 高斯的对角线 + 0.3 , 整体的 det 变大了
+	// 低通滤波
 	constexpr float h_var = 0.3f;
 	const float det_cov = cov.x * cov.z - cov.y * cov.y;
 	cov.x += h_var;
@@ -219,12 +238,14 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float det_cov_plus_h_cov = cov.x * cov.z - cov.y * cov.y;
 	float h_convolution_scaling = 1.0f;
 
+	// 因为整体的 det 增大
 	if(antialiasing)
 		h_convolution_scaling = sqrt(max(0.000025f, det_cov / det_cov_plus_h_cov)); // max for numerical stability
 
 	// Invert covariance (EWA algorithm)
 	const float det = det_cov_plus_h_cov;
 
+	// calculate the conic matrix
 	if (det == 0.0f)
 		return;
 	float det_inv = 1.f / det;
@@ -234,10 +255,14 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// 2D covariance matrix). Use extent to compute a bounding rectangle
 	// of screen-space tiles that this Gaussian overlaps with. Quit if
 	// rectangle covers 0 tiles. 
+	
+	// 计算特征值
 	float mid = 0.5f * (cov.x + cov.z);
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
-	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+
+	// 高斯椭圆的特征值代表方差
+	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2))); // calculate sigma -> 标准差, 3 sigma
 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
 	uint2 rect_min, rect_max;
 	getRect(point_image, my_radius, rect_min, rect_max, grid);
@@ -248,6 +273,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// spherical harmonics coefficients to RGB color.
 	if (colors_precomp == nullptr)
 	{
+		// 从球谐函数以及系数计算颜色, 维护的 rgb 一维数组
 		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
 		rgb[idx * C + 0] = result.x;
 		rgb[idx * C + 1] = result.y;
@@ -256,15 +282,15 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Store some useful helper data for the next steps.
 	depths[idx] = p_view.z;
-	radii[idx] = my_radius;
+	radii[idx] = my_radius; // 计算出来的每个高斯的 3 sigma, 用来计算高斯的方形包围盒
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
 	float opacity = opacities[idx];
 
-
+	// conic_opacity 中存储的是 协方差的逆以及抗混叠之后的不透明度
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacity * h_convolution_scaling };
 
-
+	// 覆盖的 tiles 的数量
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
 
@@ -290,8 +316,12 @@ renderCUDA(
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
 	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+
+	// block.group_index().x ->blockIdx.x
 	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
 	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	
+	// pix 对应当前像素的 id
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
 	uint32_t pix_id = W * pix.y + pix.x;
 	float2 pixf = { (float)pix.x, (float)pix.y };
@@ -302,11 +332,15 @@ renderCUDA(
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
+	// 通过全局 idx 来取范围, 也就是前面的存储的 pair (start,end)
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	
+	// 需要向 shared_memory 中搬运的轮数
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
+	// alloc shared memory
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
@@ -323,7 +357,7 @@ renderCUDA(
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
 		// End if entire block votes that it is done rasterizing
-		int num_done = __syncthreads_count(done);
+		int num_done = __syncthreads_count(done); // 同步数据并记录 block 中有多少数据是满足条件的
 		if (num_done == BLOCK_SIZE)
 			break;
 
@@ -357,6 +391,7 @@ renderCUDA(
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
 			// Avoid numerical instabilities (see paper appendix). 
+			// calculate the 透射率
 			float alpha = min(0.99f, con_o.w * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
@@ -368,6 +403,7 @@ renderCUDA(
 			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
+			// alpha blending
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
@@ -389,12 +425,13 @@ renderCUDA(
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
-			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];  // bg_color + alpha_blending 
 
 		if (invdepth)
 		invdepth[pix_id] = expected_invdepth;// 1. / (expected_depth + T * 1e3);
 	}
 }
+
 
 void FORWARD::render(
 	const dim3 grid, dim3 block,
@@ -426,12 +463,14 @@ void FORWARD::render(
 		depth);
 }
 
+
 void FORWARD::preprocess(int P, int D, int M,
 	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
 	const glm::vec4* rotations,
 	const float* opacities,
+	const uint8_t* gaussian_type,
 	const float* shs,
 	bool* clamped,
 	const float* cov3D_precomp,
@@ -460,6 +499,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		scale_modifier,
 		rotations,
 		opacities,
+		gaussian_type,
 		shs,
 		clamped,
 		cov3D_precomp,

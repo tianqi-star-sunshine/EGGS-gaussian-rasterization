@@ -13,6 +13,7 @@
 #define CUDA_RASTERIZER_FORWARD_H_INCLUDED
 
 #include <cuda.h>
+#include <cstdint>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
@@ -27,6 +28,7 @@ namespace FORWARD
 		const float scale_modifier,
 		const glm::vec4* rotations,
 		const float* opacities,
+		const uint8_t* gaussian_type,
 		const float* shs,
 		bool* clamped,
 		const float* cov3D_precomp,

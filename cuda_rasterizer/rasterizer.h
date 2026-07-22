@@ -14,6 +14,7 @@
 
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 namespace CudaRasterizer
 {
@@ -39,6 +40,7 @@ namespace CudaRasterizer
 			const float* shs,
 			const float* colors_precomp,
 			const float* opacities,
+			const uint8_t* gaussian_type,
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
@@ -62,6 +64,7 @@ namespace CudaRasterizer
 			const float* shs,
 			const float* colors_precomp,
 			const float* opacities,
+			const uint8_t* gaussian_type,
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,

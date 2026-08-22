@@ -154,6 +154,9 @@ void CudaRasterizer::Rasterizer::markVisible(
 		present);
 }
 
+/**
+ * @brief: 分配内存, 内存对齐
+ */
 CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P)
 {
 	GeometryState geom;
@@ -163,6 +166,8 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.means2D, P, 128);
 	obtain(chunk, geom.cov3D, P * 6, 128);
 	obtain(chunk, geom.conic_opacity, P, 128);
+	obtain(chunk, geom.transMat, P * 9, 128);
+	obtain(chunk, geom.normal_opacity, P, 128);
 	obtain(chunk, geom.rgb, P * 3, 128);
 	obtain(chunk, geom.tiles_touched, P, 128);
 	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
@@ -230,7 +235,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	// required 函数计算需要多少内存(留有安全余量)
+	// 计算内存分配
 	size_t chunk_size = required<GeometryState>(P);	
 	
 	// 申请内存, 返回首地址
@@ -258,7 +263,6 @@ int CudaRasterizer::Rasterizer::forward(
 		throw std::runtime_error("For non-RGB, provide precomputed Gaussian colors!");
 	}
 
-	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
 	CHECK_CUDA(FORWARD::preprocess(
 		P, D, M,
 		means3D,
@@ -269,6 +273,7 @@ int CudaRasterizer::Rasterizer::forward(
 		gaussian_type,
 		shs,
 		geomState.clamped,
+		nullptr, // No public producer for a precomputed 2D transform yet.
 		cov3D_precomp,
 		colors_precomp,
 		viewmatrix, projmatrix,
@@ -282,6 +287,8 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.cov3D,
 		geomState.rgb,
 		geomState.conic_opacity,
+		geomState.transMat,
+		geomState.normal_opacity,
 		tile_grid,
 		geomState.tiles_touched,
 		prefiltered,
@@ -292,10 +299,12 @@ int CudaRasterizer::Rasterizer::forward(
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
 	// 计算前缀和
 	// tiles.touched 为输入数组, points_offset 为输出计算完前缀和的数组
+	// scanning_space 以及 scan_size 为临时存储空间, 用于计算前缀和
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_rendered;
+
 	// geomeState.point_offsets 对应的是计算出来的前缀和数组对应的首元素的指针
 	// 需要向 CPU 中申请内存
 	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
@@ -348,14 +357,17 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.ranges,
 		binningState.point_list,
 		width, height,
+		gaussian_type,
 		geomState.means2D,
 		feature_ptr,
+		geomState.depths,
 		geomState.conic_opacity,
+		geomState.transMat,
+		geomState.normal_opacity,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
 		out_color,
-		geomState.depths,
 		depth), debug)
 
 	return num_rendered;
@@ -396,6 +408,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+	float* dL_dtransMat,
 	bool antialiasing,
 	bool debug)
 {
@@ -411,7 +424,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	// 当前为哪个 grid
+	// 计算 tile 网格的维度
 	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	
 	// 每一个 block 为多大
@@ -430,6 +443,8 @@ void CudaRasterizer::Rasterizer::backward(
 		background,
 		geomState.means2D,
 		geomState.conic_opacity,
+		geomState.transMat,
+		geomState.normal_opacity,
 		gaussian_type,
 		color_ptr,
 		geomState.depths,
@@ -441,8 +456,9 @@ void CudaRasterizer::Rasterizer::backward(
 		(float4*)dL_dconic,
 		dL_dopacity,
 		dL_dcolor,
-		dL_dinvdepth), debug);
-
+		dL_dinvdepth,
+		dL_dtransMat,
+		debug);
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
 	// use the one we computed ourselves.
@@ -458,14 +474,17 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec4*)rotations,
 		scale_modifier,
 		cov3D_ptr,
+		geomState.transMat,
 		viewmatrix,
 		projmatrix,
+		width, height,
 		focal_x, focal_y,
 		tan_fovx, tan_fovy,
 		(glm::vec3*)campos,
 		(float3*)dL_dmean2D,
 		dL_dconic,
 		dL_dinvdepth,
+		dL_dtransMat,
 		dL_dopacity,
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,

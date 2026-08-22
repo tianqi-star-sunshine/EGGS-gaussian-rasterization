@@ -31,6 +31,7 @@ namespace FORWARD
 		const uint8_t* gaussian_type,
 		const float* shs,
 		bool* clamped,
+		const float* transMat_precomp,
 		const float* cov3D_precomp,
 		const float* colors_precomp,
 		const float* viewmatrix,
@@ -45,6 +46,8 @@ namespace FORWARD
 		float* cov3Ds,
 		float* colors,
 		float4* conic_opacity,
+		float* transMats,
+		float4* normal_opacity,
 		const dim3 grid,
 		uint32_t* tiles_touched,
 		bool prefiltered,
@@ -56,15 +59,18 @@ namespace FORWARD
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
+		const uint8_t* gaussian_type,
 		const float2* points_xy_image,
 		const float* features,
+		const float* depths,
 		const float4* conic_opacity,
+		const float* transMats,
+		const float4* normal_opacity,
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
 		float* out_color,
-		float* depths,
-		float* depth);
+		float* out_invdepth);
 }
 
 

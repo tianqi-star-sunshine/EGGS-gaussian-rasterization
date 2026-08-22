@@ -18,6 +18,12 @@
 
 namespace CudaRasterizer
 {
+	/**
+	 * @param chunk : 内存块的起始地址
+	 * @param ptr : 指向内存块的指针
+	 * @param count : 元素数量
+	 * @param alignment : 对齐要求
+	 */
 	template <typename T>
 	static void obtain(char*& chunk, T*& ptr, std::size_t count, std::size_t alignment)
 	{
@@ -38,6 +44,8 @@ namespace CudaRasterizer
 		float2* means2D;
 		float* cov3D;
 		float4* conic_opacity;
+		float* transMat;
+		float4* normal_opacity;
 		float* rgb;
 		uint32_t* point_offsets;
 		uint32_t* tiles_touched;
@@ -66,7 +74,7 @@ namespace CudaRasterizer
 		static BinningState fromChunk(char*& chunk, size_t P);
 	};
 
-	// 模拟从 0 开始后续内存对齐的偏移量
+	// 计算所需的内存大小
 	template<typename T> 
 	size_t required(size_t P)
 	{

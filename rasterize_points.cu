@@ -33,7 +33,9 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-// 对 python 传入的参数进行包装
+/**
+ * @brief: start forwarding
+ */
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
@@ -80,13 +82,14 @@ RasterizeGaussiansCUDA(
   out_invdepthptr = out_invdepth.data<float>();
 
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
-  
+ 
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
   torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
   torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
-  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
+  
+  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer); // 分配大块内存, 内存为 torch::tensor 原始字节流
   std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
   std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
   
@@ -134,12 +137,12 @@ RasterizeGaussiansCUDA(
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& background,
-		const torch::Tensor& means3D,
-		const torch::Tensor& radii,
-		const torch::Tensor& colors,
-		const torch::Tensor& opacities,
-		const torch::Tensor& gaussian_type,
-		const torch::Tensor& scales,
+	const torch::Tensor& means3D,
+	const torch::Tensor& radii,
+	const torch::Tensor& colors,
+	const torch::Tensor& opacities,
+	const torch::Tensor& gaussian_type,
+	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
 	const torch::Tensor& cov3D_precomp,
@@ -147,7 +150,8 @@ RasterizeGaussiansBackwardCUDA(
     const torch::Tensor& projmatrix,
 	const float tan_fovx,
 	const float tan_fovy,
-    const torch::Tensor& dL_dout_color,
+	// 初始传入的对 color 和 invdepth 的梯度
+    const torch::Tensor& dL_dout_color,  
 	const torch::Tensor& dL_dout_invdepth,
 	const torch::Tensor& sh,
 	const int degree,
@@ -169,9 +173,10 @@ RasterizeGaussiansBackwardCUDA(
 	M = sh.size(1);
   }
 
+  // 维护梯度
   torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());
-  torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
+  torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options()); 
   torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
   torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
@@ -179,7 +184,9 @@ RasterizeGaussiansBackwardCUDA(
   torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
   torch::Tensor dL_dinvdepths = torch::zeros({0, 1}, means3D.options());
-  
+  // 维护 2D 高斯梯度
+  torch::Tensor dL_dtransMat = torch::zeros({P, 9}, means3D.options());
+
   float* dL_dinvdepthsptr = nullptr;
   float* dL_dout_invdepthptr = nullptr;
   if(dL_dout_invdepth.size(0) != 0)
@@ -225,7 +232,8 @@ RasterizeGaussiansBackwardCUDA(
 	  dL_dsh.contiguous().data<float>(),
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
-	  antialiasing,
+	  dL_dtransMat.contiguous().data<float>(),
+	  antialiasing, 
 	  debug);
   }
 

@@ -1039,7 +1039,7 @@ renderCUDA(
 					transMat[ 9 * coll_id + 8]
 				};
 			}
-			else if (type == GAUSSIAN_2D)
+			else if (type == GAUSSIAN_3D)
 			{
 				collected_conic_opacity[thread_idx] = conic_opacity[coll_id];
 			}
